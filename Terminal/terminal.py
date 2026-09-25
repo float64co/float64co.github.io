@@ -123,6 +123,9 @@ FOG_EXPLORED = 1
 FOG_VISIBLE = 2
 
 INITIAL_REVEAL_RADIUS = 10  # how far the player's starting HQ reveal reaches
+# Enemy HQ must spawn at least this fraction of the farthest possible
+# distance from the player HQ, so it always lands on the far side of the map.
+ENEMY_HQ_MIN_DIST_FRAC = 0.6
 
 FLOOR = "."   # bare sand - the default ground tile
 GRASS = "\""
@@ -409,17 +412,23 @@ class Game:
     # ---------------------- setup ----------------------
 
     def _random_enemy_hq(self):
-        """Pick a random valid spot for the enemy workshop, kept outside
-        the circle the player's HQ reveals at game start so the enemy
-        base is never visible from the opening view."""
+        """Pick a random valid spot for the enemy workshop, well away from
+        the player's HQ: at least ENEMY_HQ_MIN_DIST_FRAC of the farthest
+        reachable spawn distance, and never inside the opening reveal."""
         margin = min(7, self.world_w // 2 - 1, self.world_h // 2 - 1)
         margin = max(margin, 1)
         px, py = self.player_hq
-        min_d2 = INITIAL_REVEAL_RADIUS * INITIAL_REVEAL_RADIUS
+        lo_x, hi_x = margin, self.world_w - margin - 1
+        lo_y, hi_y = margin, self.world_h - margin - 1
+        far_dx = max(abs(lo_x - px), abs(hi_x - px))
+        far_dy = max(abs(lo_y - py), abs(hi_y - py))
+        min_d = max(INITIAL_REVEAL_RADIUS,
+                    ENEMY_HQ_MIN_DIST_FRAC * (far_dx * far_dx + far_dy * far_dy) ** 0.5)
+        min_d2 = min_d * min_d
         for _ in range(500):
-            x = random.randint(margin, self.world_w - margin - 1)
-            y = random.randint(margin, self.world_h - margin - 1)
-            if (x - px) ** 2 + (y - py) ** 2 <= min_d2:
+            x = random.randint(lo_x, hi_x)
+            y = random.randint(lo_y, hi_y)
+            if (x - px) ** 2 + (y - py) ** 2 < min_d2:
                 continue
             if self.grid[y][x] == WALL:
                 continue
