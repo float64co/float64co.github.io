@@ -122,6 +122,8 @@ FOG_UNSEEN = 0
 FOG_EXPLORED = 1
 FOG_VISIBLE = 2
 
+INITIAL_REVEAL_RADIUS = 10  # how far the player's starting HQ reveal reaches
+
 FLOOR = "."   # bare sand - the default ground tile
 GRASS = "\""
 WALL = "#"
@@ -369,7 +371,7 @@ class Game:
         self.fog = [[FOG_UNSEEN] * self.world_w for _ in range(self.world_h)]
 
         self.player_hq = (6, 6)
-        self.enemy_hq = (self.world_w - 7, self.world_h - 7)
+        self.enemy_hq = self._random_enemy_hq()
         clear_area(self.grid, *self.player_hq, 4)
         clear_area(self.grid, *self.enemy_hq, 4)
 
@@ -402,9 +404,28 @@ class Game:
         self._spawn_starters()
         self._init_colors()
         self._recenter_camera_on_cursor(force=True)
-        self.reveal(*self.player_hq, 10)
+        self.reveal(*self.player_hq, INITIAL_REVEAL_RADIUS)
 
     # ---------------------- setup ----------------------
+
+    def _random_enemy_hq(self):
+        """Pick a random valid spot for the enemy workshop, kept outside
+        the circle the player's HQ reveals at game start so the enemy
+        base is never visible from the opening view."""
+        margin = min(7, self.world_w // 2 - 1, self.world_h // 2 - 1)
+        margin = max(margin, 1)
+        px, py = self.player_hq
+        min_d2 = INITIAL_REVEAL_RADIUS * INITIAL_REVEAL_RADIUS
+        for _ in range(500):
+            x = random.randint(margin, self.world_w - margin - 1)
+            y = random.randint(margin, self.world_h - margin - 1)
+            if (x - px) ** 2 + (y - py) ** 2 <= min_d2:
+                continue
+            if self.grid[y][x] == WALL:
+                continue
+            return x, y
+        # Fallback if the map is too small/cramped for a valid roll.
+        return self.world_w - 7, self.world_h - 7
 
     def _init_colors(self):
         curses.start_color()
