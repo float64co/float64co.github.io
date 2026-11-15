@@ -609,11 +609,22 @@
     function startProgressTimer() {
       stopProgressTimer();
       progressTimer = setInterval(function () {
-        playerTemplate.update({
-          progress: audio.duration ? (audio.currentTime / audio.duration) * 100 : 0,
-          currentTimeStr: fmtTime(audio.currentTime),
-          durationStr: fmtTime(audio.duration)
-        });
+        /* Patch the DOM in place rather than calling update(): a full
+           re-render replaces every node under #player-mount, which swaps
+           the playlist button out from under the cursor 4x/sec — killing
+           :hover and dropping clicks (mousedown/mouseup land on different
+           nodes). */
+        var progress = audio.duration ? (audio.currentTime / audio.duration) * 100 : 0;
+        var timeStr = fmtTime(audio.currentTime);
+        var durStr = fmtTime(audio.duration);
+        playerTemplate._setSilent('progress', progress);
+        playerTemplate._setSilent('currentTimeStr', timeStr);
+        playerTemplate._setSilent('durationStr', durStr);
+        var mount = document.getElementById('player-mount');
+        var range = mount.querySelector('input[data-bind="progress"]');
+        if (range && !range._vDragging) range.value = progress;
+        var timeEl = mount.querySelector('.time');
+        if (timeEl) timeEl.textContent = timeStr + ' / ' + durStr;
       }, 250);
     }
 
