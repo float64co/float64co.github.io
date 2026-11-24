@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: omnisploit
+Version: 0.1.0
+Summary: ncurses exploit-development game with a fully simulated machine
+Requires-Python: >=3.11

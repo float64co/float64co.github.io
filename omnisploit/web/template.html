@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>omnisploit</title>
+<style>
+  :root {
+    --bg: #060a06; --fg: #9dff9d; --dim: #4e7a4e; --hot: #ff5a5a;
+    --gold: #ffd24d; --sel: #123a12; --glow: rgba(157,255,157,.35);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.2 "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    display: flex; flex-direction: column; align-items: center;
+    height: 100vh; overflow: hidden; padding: 12px 12px 0;
+  }
+  h1 {
+    flex: 0 0 auto;
+    font-size: 15px; letter-spacing: .12em; font-weight: 700; margin: 0 0 8px;
+    text-shadow: 0 0 6px var(--glow);
+  }
+  h1 .by { color: var(--dim); font-weight: 400; letter-spacing: normal; }
+  #boot {
+    flex: 0 0 auto;
+    color: var(--dim); margin-bottom: 10px; text-align: center; max-width: 640px; white-space: pre-wrap;
+  }
+  #viewport {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: min(1400px, 97vw);
+    background: #000;
+    border: 1px solid var(--sel);
+    box-shadow: 0 0 24px rgba(0,0,0,.6), inset 0 0 40px rgba(0,0,0,.5);
+    overflow: hidden;
+    display: none; /* revealed once booted */
+  }
+  #viewport::after { /* faint scanlines */
+    content: ""; pointer-events: none; position: absolute; inset: 0;
+    background: repeating-linear-gradient(0deg, transparent 0 2px, rgba(0,0,0,.18) 2px 3px);
+  }
+  #term {
+    position: absolute; inset: 0; padding: 4px 6px;
+    white-space: pre; text-shadow: 0 0 5px var(--glow);
+    font-variant-ligatures: none;
+    font-size: 13px; line-height: 1.2;
+  }
+  #term .row { white-space: pre; height: 1.2em; overflow: hidden; }
+  #cursor {
+    position: absolute; background: var(--fg); opacity: .65; pointer-events: none;
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  #focushint {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 2;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,.75); color: var(--fg); font-size: 13px; letter-spacing: .05em;
+    cursor: pointer; text-align: center; padding: 6px 12px;
+    border-bottom: 1px solid var(--sel);
+  }
+  #focushint.hidden { display: none; }
+  .foot {
+    flex: 0 0 auto;
+    width: min(1400px, 97vw); padding: 8px 2px 16px; color: var(--dim); font-size: 12px;
+  }
+  .foot b { color: var(--fg); }
+  a { color: var(--gold); }
+</style>
+</head>
+<body>
+<h1>omnisploit <span class="by">— a simulated exploit-dev terminal, in your browser</span></h1>
+<pre id="boot">bootloader
+initializing python runtime (first load fetches ~12 MB; cached after)...</pre>
+<div id="viewport" tabindex="0">
+  <div id="term"></div>
+  <div id="cursor" style="display:none"></div>
+  <div id="focushint">Click to focus, then type.</div>
+</div>
+<div class="foot">
+  Nothing here touches your real machine. Progress is kept only in this tab's memory —
+  reloading the page starts a fresh game, same as <code>omnisploit --new-game</code>.
+</div>
+
+<script type="text/x-python" id="py-curses">
+__PY_CURSES__
+</script>
+<script type="text/x-python" id="py-bridge">
+__PY_BRIDGE__
+</script>
+<script type="text/plain" id="pkg-b64">__PKG_B64__</script>
+
+<script type="text/plain" id="worker-src">
+/* Static JS, never templated: no placeholders. The python sources and the zipped package
+   arrive in the "init" postMessage instead (workers have no DOM, so they can't read the
+   page's own tags -- the main thread reads those and forwards them). See web/README.md
+   for the full boot sequence. */
+const PYODIDE_BASE = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/";
+const HEAD = 0, TAIL = 1, DOORBELL = 2, QBASE = 3;
+const CAP = 512;
+
+let ctrl = null;
+let initCols = 80, initRows = 24;
+
+function waitForEvent() {
+  while (Atomics.load(ctrl, HEAD) === Atomics.load(ctrl, TAIL)) {
+    const cur = Atomics.load(ctrl, DOORBELL);
+    Atomics.wait(ctrl, DOORBELL, cur, 5000); // timeout is just a safety net; the loop re-checks regardless
+  }
+  const idx = Atomics.load(ctrl, HEAD);
+  const kind = Atomics.load(ctrl, QBASE + 2 * idx);
+  const value = Atomics.load(ctrl, QBASE + 2 * idx + 1);
+  Atomics.store(ctrl, HEAD, (idx + 1) % CAP);
+  return [kind, value];
+}
+self.waitForEvent = waitForEvent;
+self.getInitialSize = () => [initCols, initRows];
+self.postRenderJSON = (jsonStr) => postMessage({ type: "render", json: jsonStr });
+
+self.onmessage = async (e) => {
+  if (e.data.type !== "init") return;
+  ctrl = new Int32Array(e.data.sab);
+  initCols = e.data.cols;
+  initRows = e.data.rows;
+  try {
+    await boot(e.data.pyCurses, e.data.pyBridge, e.data.pkgB64);
+  } catch (err) {
+    postMessage({ type: "error", message: String((err && err.stack) || err) });
+  }
+};
+
+async function boot(pyCurses, pyBridge, pkgB64) {
+  postMessage({ type: "status", text: "fetching python runtime (first load only; cached after)..." });
+  importScripts(PYODIDE_BASE + "pyodide.js");
+  const pyodide = await loadPyodide({ indexURL: PYODIDE_BASE });
+
+  postMessage({ type: "status", text: "unpacking omnisploit..." });
+  const bin = atob(pkgB64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  pyodide.unpackArchive(bytes, "zip");
+  pyodide.runPython("import sys; sys.path.insert(0, '.')");
+
+  pyodide.runPython(`
+import sys, types
+def _load_module(name, source):
+    mod = types.ModuleType(name)
+    exec(compile(source, name, "exec"), mod.__dict__)
+    sys.modules[name] = mod
+    return mod
+`);
+  const loadModule = pyodide.globals.get("_load_module");
+  loadModule("curses", pyCurses);
+  const bridge = loadModule("web_bridge", pyBridge);
+  loadModule.destroy();
+
+  postMessage({ type: "status", text: "starting omnisploit..." });
+  bridge.web_start();
+}
+</script>
+
+<script>
+/* ============================================================== bootstrap */
+const PY_CURSES = document.getElementById("py-curses").textContent;
+const PY_BRIDGE = document.getElementById("py-bridge").textContent;
+const PKG_B64 = document.getElementById("pkg-b64").textContent.trim();
+const WORKER_SRC = document.getElementById("worker-src").textContent;
+
+const HEAD = 0, TAIL = 1, DOORBELL = 2, QBASE = 3, CAP = 512;
+const CTRL_WORDS = QBASE + 2 * CAP;
+
+const KEY_BACKSPACE = 1001, KEY_UP = 1002, KEY_DOWN = 1003, KEY_LEFT = 1004, KEY_RIGHT = 1005,
+      KEY_DC = 1006, KEY_HOME = 1007, KEY_END = 1008, KEY_PPAGE = 1009, KEY_NPAGE = 1010,
+      KEY_ENTER = 1011, KEY_BTAB = 1012, KEY_RESIZE = 1013;
+
+// Created lazily in boot(), once crossOriginIsolated is confirmed -- SharedArrayBuffer
+// doesn't exist at all otherwise, and referencing the constructor before that throws
+// (which would abort this whole script, including the isolation check further down).
+let sab = null;
+let ctrl = null;
+
+function pushEvent(kind, value) {
+  if (!ctrl) return; // not booted yet; drop (there's nothing listening regardless)
+  const tail = Atomics.load(ctrl, TAIL);
+  const next = (tail + 1) % CAP;
+  if (next === Atomics.load(ctrl, HEAD)) return; // queue full (shouldn't happen under human typing speed); drop
+  Atomics.store(ctrl, QBASE + 2 * tail, kind);
+  Atomics.store(ctrl, QBASE + 2 * tail + 1, value);
+  Atomics.store(ctrl, TAIL, next);
+  Atomics.add(ctrl, DOORBELL, 1);
+  Atomics.notify(ctrl, DOORBELL, 1);
+}
+
+const $viewport = document.getElementById("viewport");
+const $term = document.getElementById("term");
+const $cursor = document.getElementById("cursor");
+const $focushint = document.getElementById("focushint");
+const $boot = document.getElementById("boot");
+
+let cellW = 8, cellH = 16;
+let cols = 80, rows = 24;
+
+function measureCell() {
+  const probe = document.createElement("div");
+  probe.className = "row";
+  probe.style.visibility = "hidden";
+  probe.style.position = "absolute";
+  probe.textContent = "M".repeat(80);
+  $term.appendChild(probe);
+  const r = probe.getBoundingClientRect();
+  $term.removeChild(probe);
+  return { w: r.width / 80 || cellW, h: r.height || cellH };
+}
+
+function layout() {
+  const cell = measureCell();
+  cellW = cell.w;
+  cellH = cell.h;
+  const avail = $viewport.getBoundingClientRect();
+  cols = Math.max(80, Math.floor((avail.width - 12) / cellW));
+  rows = Math.max(24, Math.floor((avail.height - 8) / cellH));
+}
+
+const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+function renderScreen(json) {
+  const view = JSON.parse(json);
+  let html = "";
+  for (const runs of view.data) {
+    html += '<div class="row">';
+    for (const [text, fg, bg, bold, dim, under] of runs) {
+      let style = `color:${fg}`;
+      if (bg) style += `;background:${bg}`;
+      if (bold) style += ";font-weight:700";
+      if (dim) style += ";opacity:.6";
+      if (under) style += ";text-decoration:underline";
+      html += `<span style="${style}">${esc(text)}</span>`;
+    }
+    html += "</div>";
+  }
+  $term.innerHTML = html;
+  if (view.cursor) {
+    const [cy, cx] = view.cursor;
+    $cursor.style.display = "block";
+    $cursor.style.left = `${6 + cx * cellW}px`;
+    $cursor.style.top = `${4 + cy * cellH}px`;
+    $cursor.style.width = `${cellW}px`;
+    $cursor.style.height = `${cellH}px`;
+  } else {
+    $cursor.style.display = "none";
+  }
+}
+
+let worker = null;
+
+async function boot() {
+  sab = new SharedArrayBuffer(CTRL_WORDS * 4);
+  ctrl = new Int32Array(sab);
+  layout();
+  const blob = new Blob([WORKER_SRC], { type: "text/javascript" });
+  worker = new Worker(URL.createObjectURL(blob));
+  const watchdog = setTimeout(() => {
+    $boot.textContent =
+      "bootloader\nstill waiting on the worker after 20s (last status: " +
+      $boot.textContent.split("\n").pop() + ").\n" +
+      "Open devtools (F12) -> Console/Network for the actual error -- " +
+      "this usually means pyodide.js or one of its data files failed to load.";
+  }, 20000);
+  worker.onmessage = (e) => {
+    clearTimeout(watchdog);
+    const msg = e.data;
+    if (msg.type === "render") {
+      if ($boot.parentElement) {
+        // #viewport (and #term inside it) was display:none until now, so the layout() call in
+        // boot() measured a hidden, zero-size box and silently fell back to default cell metrics
+        // that don't match this font (cellH=16 vs. the real 15.6px row height) -- re-measure now
+        // that it actually has a box, before the first real render positions the cursor with it.
+        $boot.remove();
+        $viewport.style.display = "block";
+        relayout();
+        $viewport.focus();
+        window.addEventListener("resize", onResize);
+      }
+      renderScreen(msg.json);
+    } else if (msg.type === "status") {
+      $boot.textContent = "bootloader\n" + msg.text;
+    } else if (msg.type === "error") {
+      $boot.textContent = "boot failed:\n" + msg.message;
+    }
+  };
+  worker.onerror = (e) => {
+    clearTimeout(watchdog);
+    $boot.textContent = "worker failed to start:\n" + (e.message || e);
+  };
+  worker.postMessage({ type: "init", sab, cols, rows, pyCurses: PY_CURSES, pyBridge: PY_BRIDGE, pkgB64: PKG_B64 });
+}
+
+function relayout() {
+  const prevCols = cols, prevRows = rows;
+  layout();
+  if (cols !== prevCols || rows !== prevRows) {
+    pushEvent(2, cols * 100000 + rows);
+  }
+}
+
+let resizeTimer = null;
+function onResize() {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(relayout, 120);
+}
+
+/* ============================================================== input */
+function keydownToEvent(e) {
+  if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1 && /[a-zA-Z]/.test(e.key)) {
+    return [0, e.key.toUpperCase().charCodeAt(0) - 64];
+  }
+  if (e.key === "Tab") return e.shiftKey ? [1, KEY_BTAB] : [0, 9];
+  switch (e.key) {
+    case "Enter": return [0, 10];
+    case "Backspace": return [0, 127];
+    case "Escape": return [0, 27];
+    case "ArrowUp": return [1, KEY_UP];
+    case "ArrowDown": return [1, KEY_DOWN];
+    case "ArrowLeft": return [1, KEY_LEFT];
+    case "ArrowRight": return [1, KEY_RIGHT];
+    case "Delete": return [1, KEY_DC];
+    case "Home": return [1, KEY_HOME];
+    case "End": return [1, KEY_END];
+    case "PageUp": return [1, KEY_PPAGE];
+    case "PageDown": return [1, KEY_NPAGE];
+  }
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {
+    return [0, e.key.codePointAt(0)];
+  }
+  return null;
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey) return;
+  const evt = keydownToEvent(e);
+  if (!evt) return;
+  e.preventDefault();
+  $focushint.classList.add("hidden");
+  pushEvent(evt[0], evt[1]);
+});
+$viewport.addEventListener("click", () => {
+  $focushint.classList.add("hidden");
+  $viewport.focus();
+});
+
+/* ============================================================== cross-origin isolation */
+// SharedArrayBuffer needs crossOriginIsolated === true, which needs COOP/COEP response
+// headers on the *document* request -- see coi-serviceworker.js. A freshly installed
+// service worker only affects requests made *after* it's in control, so the very first
+// load reloads itself once (guarded so a browser that can never achieve isolation,
+// e.g. no service worker support or plain http on a non-localhost host, doesn't loop).
+function setBoot(text) {
+  $boot.textContent = "bootloader\n" + text;
+}
+
+async function ensureIsolatedThenBoot() {
+  setBoot(`checking cross-origin isolation... (crossOriginIsolated=${self.crossOriginIsolated}, ` +
+          `SharedArrayBuffer=${typeof SharedArrayBuffer !== "undefined"})`);
+  if (self.crossOriginIsolated && typeof SharedArrayBuffer !== "undefined") {
+    setBoot("isolated. booting worker...");
+    boot();
+    return;
+  }
+  if (!("serviceWorker" in navigator)) {
+    setBoot("this browser has no service worker support, so cross-origin isolation " +
+            "(needed for SharedArrayBuffer) can't be set up.");
+    return;
+  }
+  const already = sessionStorage.getItem("omnisploit-coi-reload") === "1";
+  if (already) {
+    setBoot("cross-origin isolation did not take effect after a reload.\n" +
+            "This page must be served over http(s) (not opened as a local file), " +
+            "and coi-serviceworker.js must be reachable next to index.html.");
+    return;
+  }
+  setBoot("not yet isolated. registering coi-serviceworker.js...");
+  let reg;
+  try {
+    reg = await navigator.serviceWorker.register("coi-serviceworker.js");
+  } catch (e) {
+    setBoot("could not register coi-serviceworker.js: " + e);
+    return;
+  }
+  setBoot("registered (scope " + reg.scope + "). waiting for it to activate...");
+  try {
+    await navigator.serviceWorker.ready;
+  } catch (e) {
+    setBoot("service worker never became ready: " + e);
+    return;
+  }
+  setBoot("active. reloading to pick up isolation headers...");
+  sessionStorage.setItem("omnisploit-coi-reload", "1");
+  location.reload();
+}
+
+ensureIsolatedThenBoot();
+</script>
+</body>
+</html>

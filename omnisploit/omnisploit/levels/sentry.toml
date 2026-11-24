@@ -1,0 +1,112 @@
+# Level 6: the same ret2win as motd, but with a stack canary this time. Overflowing straight
+# through to the return address trips "stack smashing detected" instead; the payload has to
+# preserve the canary's exact bytes to get past it. In this simulation the canary is a fixed
+# constant baked into the instructions (there is no ASLR/TLS here), so it can be read straight
+# out of the disassembly or the stack -- the point of this level is what you do once you have it,
+# not practicing a leak (that is the notice level). Generated; see engine/cpu.py for the engine.
+
+id = "sentry"
+title = "sentry"
+flag = "FLAG{the_canary_sings_if_you_listen}"
+flag_path = "/opt/sentry/flag.txt"
+vuln = "stack_overflow_canary"
+prompt_text = "guard: "
+readme = """== sentry =======================================================
+
+Brightside's "sentry" service is the same kind of overflow as motd --
+except this one was compiled with a stack canary. The flag lives in
+/opt/sentry/flag.txt and only root can read it, but sentry's win()
+function will cat it for you.
+
+A plain ret2win payload (junk + win's address) will not work here:
+it corrupts the canary on the way to the return address, and the
+program aborts with "stack smashing detected" before it ever returns.
+
+You need the canary's exact value, then build a payload that writes
+it back unchanged before overwriting the return address.
+
+Goal: make ./sentry print the flag.
+
+Toolbox: checksec (now actually reports a canary), r2 (pdf @ sym.vuln
+shows the comparison and its constant directly), gdb (break before the
+comparison and x/gx the stack), python3 with pwn for the payload.
+"""
+
+[binary]
+path = "/home/player/sentry/sentry"
+base = 0x400000
+build_id = "1c2b3a4958677869504132f1e0d0c0b0a090807"
+
+[mitigations]
+relro = "partial"
+canary = true
+nx = true
+pie = false
+
+[stack]
+buffer_addr = 0x7fffffffdf90
+buffer_size = 72
+saved_rbp = 0x7fffffffdfe0
+return_addr = 0x0
+size = 512
+
+[imports]
+printf = 0x401030
+gets = 0x401040
+system = 0x401050
+__stack_chk_fail = 0x401060
+
+[[strings]]
+addr = 0x402004
+text = "guard: "
+
+[[strings]]
+addr = 0x40200c
+text = "cat /opt/sentry/flag.txt"
+
+[[functions]]
+name = "win"
+addr = 0x401176
+insns = [
+  "401176 55 push rbp",
+  "401177 4889e5 mov rbp, rsp",
+  "40117a 488d3d8b0e0000 lea rdi, str.cat__opt_sentry_flag.txt ; 0x40200c",
+  "401181 e8cafeffff call sym.imp.system",
+  "401186 5d pop rbp",
+  "401187 c3 ret",
+]
+
+[[functions]]
+name = "vuln"
+addr = 0x401188
+locals = ["var char *canary @ rbp-0x8", "var char buf[0x48] @ rbp-0x50"]
+insns = [
+  "401188 55 push rbp",
+  "401189 4889e5 mov rbp, rsp",
+  "40118c 4883ec50 sub rsp, 0x50",
+  "401190 48c745f800f0adba mov qword [rbp-8], 0xbaadf000",
+  "401198 488d3d650e0000 lea rdi, str.guard_ ; 0x402004",
+  "40119f b800000000 mov eax, 0",
+  "4011a4 e887feffff call sym.imp.printf",
+  "4011a9 488d45b0 lea rax, [rbp-0x50]",
+  "4011ad 4889c7 mov rdi, rax",
+  "4011b0 e88bfeffff call sym.imp.gets",
+  "4011b5 488b45f8 mov rax, qword [rbp-8]",
+  "4011b9 483d00f0adba cmp rax, 0xbaadf000",
+  "4011bf 7405 je 0x4011c6",
+  "4011c1 e89afeffff call sym.imp.__stack_chk_fail",
+  "4011c6 c9 leave",
+  "4011c7 c3 ret",
+]
+
+[[functions]]
+name = "main"
+addr = 0x4011c8
+insns = [
+  "4011c8 55 push rbp",
+  "4011c9 4889e5 mov rbp, rsp",
+  "4011cc e8b7ffffff call sym.vuln",
+  "4011d1 b800000000 mov eax, 0",
+  "4011d6 5d pop rbp",
+  "4011d7 c3 ret",
+]
