@@ -1396,8 +1396,8 @@ class Game:
         # into separate pitch/roll steps - roll alone doesn't reduce the aim
         # angle at all, it only re-aims where pitch would go, so treating
         # them as two independent proportional corrections can settle into a
-        # stable *non-zero* angle instead of ever reaching zero. The
-        # tradeoff: this also re-levels roll to world-up each tick, like a
+        # stable *non-zero* angle instead of ever reaching zero. While
+        # turning, roll is also eased gradually back toward world-up, like a
         # simple auto-align autopilot - full free roll only comes from the
         # keyboard.
         if self.mouse_seek_target is not None and self.mouse_turn_rate > 1e-4:
@@ -1405,7 +1405,18 @@ class Game:
             if v_dot(target_dir, self.p_fwd) < 0.99999:
                 new_fwd = v_norm(v_add(self.p_fwd,
                                          v_scale(v_sub(target_dir, self.p_fwd), self.mouse_turn_rate)))
-                self.p_fwd, self.p_up, self.p_right = derive_basis(new_fwd)
+                # Carry the previous up vector forward rather than
+                # rebuilding it from WORLD_UP, which flips the view when
+                # the nose passes through vertical.
+                right = v_norm(v_cross(self.p_up, new_fwd))
+                up = v_norm(v_cross(new_fwd, right))
+                # Then ease roll toward level, fading out near vertical
+                # (level shrinks to zero length at the poles).
+                level = v_cross(new_fwd, v_cross(WORLD_UP, new_fwd))
+                roll_err = math.atan2(v_dot(level, right), v_dot(level, up))
+                self.p_fwd, self.p_up, self.p_right = apply_pitch_roll(
+                    new_fwd, up, right,
+                    0.0, roll_err * self.mouse_turn_rate * v_len(level) ** 2)
 
         self.speed = clamp(self.speed + clamp(self.throttle - self.speed, -st["accel"], st["accel"]),
                              -st["speed"] * REVERSE_FRACTION, st["speed"])
