@@ -31,7 +31,8 @@ Controls:
         Up/Down             - pitch
         .  /  ,             - throttle up / down (holds past zero into
                               a slower reverse)
-        Space               - fire laser
+        Space               - fire laser (auto-locks onto the nearest
+                              pirate in range, in any direction)
         M                   - fire missile at locked target
         Tab                 - cycle target lock
         E                   - fire ECM burst (jams nearby missiles)
@@ -1589,28 +1590,36 @@ class Game:
         self.laser_cooldown = spec["cooldown"]
         ppos = (self.px, self.py, self.pz)
         muzzle = local_to_world(ppos, self.p_right, self.p_up, self.p_fwd, LASER_MUZZLE_OFFSET)
-        best = None
-        best_d = spec["range"]
-        for npc in self.npcs:
-            if not npc.alive:
-                continue
-            rel = (npc.x - self.px, npc.y - self.py, npc.z - self.pz)
-            d = v_len(rel)
-            if d > spec["range"] or d < 1e-6:
-                continue
-            if v_dot(v_scale(rel, 1.0 / d), self.p_fwd) < math.cos(LASER_CONE):
-                continue
-            if npc.id == self.target_id:
-                best = npc
-                break
-            if d < best_d:
-                best_d = d
-                best = npc
+        # Auto lock-on: the nearest pirate in range gets hit, wherever the
+        # nose is pointing.
+        pirates = [n for n in self.npcs if n.alive and n.kind == "Pirate"
+                   and math.dist(ppos, (n.x, n.y, n.z)) <= spec["range"]]
+        best = min(pirates, key=lambda n: math.dist(ppos, (n.x, n.y, n.z)), default=None)
+        if best is None:
+            # No lock - fire straight ahead, hitting whatever is in the cone.
+            best_d = spec["range"]
+            for npc in self.npcs:
+                if not npc.alive:
+                    continue
+                rel = (npc.x - self.px, npc.y - self.py, npc.z - self.pz)
+                d = v_len(rel)
+                if d > spec["range"] or d < 1e-6:
+                    continue
+                if v_dot(v_scale(rel, 1.0 / d), self.p_fwd) < math.cos(LASER_CONE):
+                    continue
+                if npc.id == self.target_id:
+                    best = npc
+                    break
+                if d < best_d:
+                    best_d = d
+                    best = npc
         if best is None:
             far = v_add(muzzle, v_scale(self.p_fwd, spec["range"]))
             self.fx_lines.append([muzzle[0], muzzle[1], muzzle[2], far[0], far[1], far[2], LASER_FX_TICKS])
             return
-        self.fx_lines.append([muzzle[0], muzzle[1], muzzle[2], best.x, best.y, best.z, LASER_FX_TICKS])
+        # The trailing id lets the renderer keep the beam on the ship as it moves.
+        self.fx_lines.append([muzzle[0], muzzle[1], muzzle[2], best.x, best.y, best.z,
+                              LASER_FX_TICKS, best.id])
         was_trader_or_police = best.kind in ("Trader", "Police")
         self._apply_damage_npc(best, spec["dmg"])
         if was_trader_or_police:
@@ -1952,6 +1961,30 @@ class Game:
             sy = -lp[1] / lp[2] * PROJ_SCALE_Y
             return cx + int(round(sx)), cy + int(round(sy))
 
+        def draw_beam(twp, attr):
+            # A locked-on beam is drawn in screen space, from the bottom of the
+            # view to the target. If the target is off screen or behind, it
+            # runs to the view edge on that side, so it never just vanishes.
+            start = (cx, TOP_H + view_h - 1)
+            lp = to_view(twp)
+            if lp[2] >= NEAR_PLANE:
+                gx, gy = project(lp)
+                if 0 <= gx < view_w and TOP_H <= gy < TOP_H + view_h:
+                    draw_line(start, (gx, gy), attr)
+                    return
+            dx = lp[0] * PROJ_SCALE_X
+            # never aim downward: that would collapse the beam into its origin
+            dy = min(-lp[1] * PROJ_SCALE_Y, 0.0)
+            if abs(dx) < 1e-6 and dy > -1e-6:
+                dx = 1.0
+            scales = []
+            if abs(dx) > 1e-6:
+                scales.append(((view_w - 1 - cx) if dx > 0 else cx) / abs(dx))
+            if dy < -1e-6:
+                scales.append((cy - TOP_H) / -dy)
+            t = min(scales)
+            draw_line(start, (cx + int(round(dx * t)), cy + int(round(dy * t))), attr)
+
         def draw_point(wp, ch, attr):
             lp = to_view(wp)
             if lp[2] < NEAR_PLANE or lp[2] > VIEW_RANGE:
@@ -1964,8 +1997,11 @@ class Game:
             clipped = clip_near(to_view(p0w), to_view(p1w), NEAR_PLANE)
             if not clipped:
                 return
-            ax, ay = project(clipped[0])
-            bx, by = project(clipped[1])
+            draw_line(project(clipped[0]), project(clipped[1]), attr, ch)
+
+        def draw_line(a, b, attr, ch=None):
+            ax, ay = a
+            bx, by = b
             dx, dy = bx - ax, by - ay
             steps = max(abs(dx), abs(dy), 1)
             if steps > 4000:
@@ -2034,9 +2070,13 @@ class Game:
             draw_point((m.x, m.y, m.z), '*', attr)
 
         for f in self.fx_lines:
-            x1, y1, z1, x2, y2, z2, ttl = f
+            x1, y1, z1, x2, y2, z2, ttl = f[:7]
             attr = curses.color_pair(CP_WARN) | (curses.A_BOLD if ttl > LASER_FX_TICKS // 2 else 0)
-            draw_edge((x1, y1, z1), (x2, y2, z2), attr)
+            if len(f) > 7:  # player beam locked onto a ship
+                tgt = self._get_npc(f[7])
+                draw_beam((tgt.x, tgt.y, tgt.z) if tgt else (x2, y2, z2), attr)
+            else:
+                draw_edge((x1, y1, z1), (x2, y2, z2), attr)
 
         self._safe_addch(cy, cx, '+', curses.color_pair(CP_PLAYER) | curses.A_BOLD)
 
