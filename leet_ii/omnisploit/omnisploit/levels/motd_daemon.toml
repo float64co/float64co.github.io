@@ -1,0 +1,95 @@
+# Level 1: a fictional message-of-the-day greeter with a classic stack overflow.
+# Everything here is invented; the "binary" is data interpreted by engine/machine.py.
+
+id = "motd-daemon"
+title = "motd-daemon"
+flag = "FLAG{ret2win_is_just_the_beginning}"
+flag_path = "/opt/motd/flag.txt"
+vuln = "stack_overflow"
+prompt_text = "name? "
+
+[binary]
+path = "/home/player/motd-daemon/motd"
+base = 0x400000
+build_id = "5f1b7c0e2c6a4d83b19e0a7f6d3c58e4a2b1d097"
+
+[mitigations]
+relro = "partial"
+canary = false
+nx = true
+pie = false
+
+[stack]
+buffer_addr = 0x7fffffffdf90   # address of the 64-byte buffer in vuln()'s frame
+buffer_size = 64
+saved_rbp = 0x7fffffffdfe0     # main()'s rbp, stored right after the buffer
+return_addr = 0x4011fc         # return address into main()
+size = 512
+
+[imports]
+printf = 0x401030
+gets = 0x401040
+system = 0x401050
+
+[[strings]]
+addr = 0x402004
+text = "name? "
+
+[[strings]]
+addr = 0x40200b
+text = "Hello, %s\n"
+
+[[strings]]
+addr = 0x402016
+text = "cat /opt/motd/flag.txt"
+
+[[functions]]
+name = "win"
+addr = 0x401196
+insns = [
+  "401196 55 push rbp",
+  "401197 4889e5 mov rbp, rsp",
+  "40119a 488d3d750e0000 lea rdi, str.cat__opt_motd_flag.txt ; 0x402016",
+  "4011a1 e8aafeffff call sym.imp.system",
+  "4011a6 90 nop",
+  "4011a7 5d pop rbp",
+  "4011a8 c3 ret",
+]
+
+[[functions]]
+name = "vuln"
+addr = 0x4011a9
+locals = ["var char *s @ rbp-0x40"]
+insns = [
+  "4011a9 55 push rbp",
+  "4011aa 4889e5 mov rbp, rsp",
+  "4011ad 4883ec40 sub rsp, 0x40",
+  "4011b1 488d3d4c0e0000 lea rdi, str.name_ ; 0x402004",
+  "4011b8 b800000000 mov eax, 0",
+  "4011bd e86efeffff call sym.imp.printf",
+  "4011c2 488d45c0 lea rax, [s]",
+  "4011c6 4889c7 mov rdi, rax",
+  "4011c9 b800000000 mov eax, 0",
+  "4011ce e86dfeffff call sym.imp.gets",
+  "4011d3 488d45c0 lea rax, [s]",
+  "4011d7 4889c6 mov rsi, rax",
+  "4011da 488d3d2a0e0000 lea rdi, str.Hello___s ; 0x40200b",
+  "4011e1 b800000000 mov eax, 0",
+  "4011e6 e845feffff call sym.imp.printf",
+  "4011eb 90 nop",
+  "4011ec c9 leave",
+  "4011ed c3 ret",
+]
+
+[[functions]]
+name = "main"
+addr = 0x4011ee
+insns = [
+  "4011ee 55 push rbp",
+  "4011ef 4889e5 mov rbp, rsp",
+  "4011f2 b800000000 mov eax, 0",
+  "4011f7 e8adffffff call sym.vuln",
+  "4011fc b800000000 mov eax, 0",
+  "401201 5d pop rbp",
+  "401202 c3 ret",
+]

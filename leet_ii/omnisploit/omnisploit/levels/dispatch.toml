@@ -1,0 +1,99 @@
+# Level 7: a format-string write (%n), used to hijack a GOT-style dispatch table entry so a later
+# call lands in win() instead of the real libc function. Builds on the read-only leak in notice.toml;
+# this time the format string also writes. Generated; see engine/cpu.py for the engine.
+
+id = "dispatch"
+title = "dispatch"
+flag = "FLAG{the_table_pointed_somewhere_else}"
+flag_path = "/opt/dispatch/flag.txt"
+vuln = "format-string-write"
+prompt_text = "say: "
+readme = """== dispatch =====================================================
+
+Brightside's "dispatch" service echoes what you say, then relays it
+through a small internal table of function pointers (one slot per
+message type) before actually printing it. The flag lives in
+/opt/dispatch/flag.txt and only root can read it -- but dispatch's
+win() function will cat it for you if execution ever reaches it.
+
+There is no overflow here, and the table entry dispatch calls through
+is never checked against anything. If the entry stops pointing at the
+real function, the call still happens -- just somewhere else.
+
+Goal: make ./dispatch print the flag. You will need %n, not just %x.
+
+Toolbox: r2 (pdf @ main shows the table slot and the indirect call),
+gdb (x/gx on the table slot before and after), man printf for %n/%hn.
+"""
+
+[binary]
+path = "/home/player/dispatch/dispatch"
+base = 0x400000
+build_id = "2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d"
+
+[mitigations]
+relro = "partial"
+canary = false
+nx = true
+pie = false
+
+[stack]
+buffer_addr = 0x7fffffffcce0   # the %hn padding needed to redirect a call is thousands of bytes,
+buffer_size = 4848             # so this level's buffer -- and its mapped stack window -- are far
+saved_rbp = 0x7fffffffdfe0     # bigger than the other levels', which get by with a few hundred.
+return_addr = 0x0
+size = 8704
+
+[imports]
+printf = 0x401030
+gets = 0x401040
+puts = 0x401050
+system = 0x401060
+
+[[strings]]
+addr = 0x402004
+text = "say: "
+
+[[strings]]
+addr = 0x40200a
+text = "cat /opt/dispatch/flag.txt"
+
+[[functions]]
+name = "win"
+addr = 0x401176
+insns = [
+  "401176 55 push rbp",
+  "401177 4889e5 mov rbp, rsp",
+  "40117a 488d3d890e0000 lea rdi, str.cat__opt_dispatch_flag.txt ; 0x40200a",
+  "401181 e8dafeffff call sym.imp.system",
+  "401186 5d pop rbp",
+  "401187 c3 ret",
+]
+
+[[functions]]
+name = "main"
+addr = 0x401188
+locals = ["var char **table_slot @ rbp-0x10", "var char **slot_ptr @ rbp-0x8", "var char buf[0x12f0] @ rbp-0x1300"]
+insns = [
+  "401188 55 push rbp",
+  "401189 4889e5 mov rbp, rsp",
+  "40118c 4881ec00130000 sub rsp, 0x1300",
+  "401193 48c745f050104000 mov qword [rbp-0x10], 0x401050",
+  "40119b 488d45f0 lea rax, [rbp-0x10]",
+  "40119f 488945f8 mov qword [rbp-8], rax",
+  "4011a3 488d3d5a0e0000 lea rdi, str.say_ ; 0x402004",
+  "4011aa b800000000 mov eax, 0",
+  "4011af e87cfeffff call sym.imp.printf",
+  "4011b4 488d8500edffff lea rax, [rbp-0x1300]",
+  "4011bb 4889c7 mov rdi, rax",
+  "4011be e87dfeffff call sym.imp.gets",
+  "4011c3 488d8500edffff lea rax, [rbp-0x1300]",
+  "4011ca 4889c7 mov rdi, rax",
+  "4011cd e85efeffff call sym.imp.printf",
+  "4011d2 488d8500edffff lea rax, [rbp-0x1300]",
+  "4011d9 4889c7 mov rdi, rax",
+  "4011dc ff55f0 call qword [rbp-0x10]",
+  "4011df b800000000 mov eax, 0",
+  "4011e4 c9 leave",
+  "4011e5 c3 ret",
+]

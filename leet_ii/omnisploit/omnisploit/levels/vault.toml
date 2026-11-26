@@ -1,0 +1,126 @@
+# Level 2: a passphrase-checking CLI ("crackme"). The password never appears in `strings`,
+# because it is assembled one byte at a time on the stack. Generated; see engine/cpu.py for the
+# instructions the stepper understands.
+
+id = "vault"
+title = "vault"
+flag = "FLAG{the_stack_remembers_everything}"
+flag_path = "/opt/vault/flag.txt"
+vuln = "crackme"
+prompt_text = "pass: "
+readme = """== vault ========================================================
+
+Brightside's internal "vault" tool guards a flag behind a passphrase.
+The flag lives in /opt/vault/flag.txt and only root can read it, but the
+vault program will cat it for you if you give it the right passphrase.
+
+There is nothing to overflow here. You have to find out what it wants.
+
+Goal: make ./vault print the flag.
+
+Toolbox: strings (try it), r2 (aaa, afl, pdf @ sym.check_password),
+gdb (break on the comparison, then look at its arguments), checksec.
+"""
+
+[binary]
+path = "/home/player/vault/vault"
+base = 0x400000
+build_id = "9a3c51d7e08b4f26a1c3d5e7f90b2468ace13579"
+
+[mitigations]
+relro = "partial"
+canary = false
+nx = true
+pie = false
+
+[stack]
+buffer_addr = 0x7fffffffdfa0   # lowest local in main()'s frame (rbp-0x30)
+buffer_size = 48
+saved_rbp = 0x7fffffffdfe0     # main()'s rbp
+return_addr = 0x0
+size = 512
+
+[imports]
+printf = 0x401030
+scanf = 0x401040
+strcmp = 0x401050
+puts = 0x401060
+system = 0x401070
+
+[[strings]]
+addr = 0x402004
+text = "pass: "
+
+[[strings]]
+addr = 0x40200b
+text = "%31s"
+
+[[strings]]
+addr = 0x402010
+text = "Welcome back."
+
+[[strings]]
+addr = 0x40201e
+text = "Wrong."
+
+[[strings]]
+addr = 0x402025
+text = "cat /opt/vault/flag.txt"
+
+[[functions]]
+name = "main"
+addr = 0x4011bb
+insns = [
+  "4011bb 55 push rbp",
+  "4011bc 4889e5 mov rbp, rsp",
+  "4011bf 4883ec30 sub rsp, 0x30",
+  "4011c3 488d3d3a0e0000 lea rdi, str.pass_ ; 0x402004",
+  "4011ca b800000000 mov eax, 0",
+  "4011cf e85cfeffff call sym.imp.printf",
+  "4011d4 488d45d0 lea rax, [rbp-0x30]",
+  "4011d8 4889c6 mov rsi, rax",
+  "4011db 488d3d290e0000 lea rdi, str._31s ; 0x40200b",
+  "4011e2 b800000000 mov eax, 0",
+  "4011e7 e854feffff call sym.imp.scanf",
+  "4011ec 488d45d0 lea rax, [rbp-0x30]",
+  "4011f0 4889c7 mov rdi, rax",
+  "4011f3 e87effffff call sym.check_password",
+  "4011f8 85c0 test eax, eax",
+  "4011fa 751a jne 0x401216",
+  "4011fc 488d3d0d0e0000 lea rdi, str.Welcome_back. ; 0x402010",
+  "401203 e858feffff call sym.imp.puts",
+  "401208 488d3d160e0000 lea rdi, str.cat__opt_vault_flag.txt ; 0x402025",
+  "40120f e85cfeffff call sym.imp.system",
+  "401214 eb0c jmp 0x401222",
+  "401216 488d3d010e0000 lea rdi, str.Wrong. ; 0x40201e",
+  "40121d e83efeffff call sym.imp.puts",
+  "401222 b800000000 mov eax, 0",
+  "401227 c9 leave",
+  "401228 c3 ret",
+]
+
+[[functions]]
+name = "check_password"
+addr = 0x401176
+insns = [
+  "401176 55 push rbp",
+  "401177 4889e5 mov rbp, rsp",
+  "40117a 4883ec20 sub rsp, 0x20",
+  "40117e 48897de8 mov qword [rbp-0x18], rdi",
+  "401182 c645f04e mov byte [rbp-0x10], 0x4e",
+  "401186 c645f131 mov byte [rbp-0xf], 0x31",
+  "40118a c645f267 mov byte [rbp-0xe], 0x67",
+  "40118e c645f368 mov byte [rbp-0xd], 0x68",
+  "401192 c645f474 mov byte [rbp-0xc], 0x74",
+  "401196 c645f54f mov byte [rbp-0xb], 0x4f",
+  "40119a c645f677 mov byte [rbp-0xa], 0x77",
+  "40119e c645f76c mov byte [rbp-0x9], 0x6c",
+  "4011a2 c645f800 mov byte [rbp-8], 0",
+  "4011a6 488d55f0 lea rdx, [rbp-0x10]",
+  "4011aa 488b45e8 mov rax, qword [rbp-0x18]",
+  "4011ae 4889d6 mov rsi, rdx",
+  "4011b1 4889c7 mov rdi, rax",
+  "4011b4 e897feffff call sym.imp.strcmp",
+  "4011b9 c9 leave",
+  "4011ba c3 ret",
+]

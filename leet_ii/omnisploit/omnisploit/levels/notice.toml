@@ -1,0 +1,81 @@
+# Level 5: a format-string vulnerability. The notice board passes player input straight to
+# printf() as the format string itself, instead of printf("%s", input), so %x/%p/%N$x read
+# whatever is sitting in the argument registers and the caller's stack -- including a local
+# variable that was never meant to be printed. Generated; see engine/cpu.py for the engine.
+
+id = "notice"
+title = "notice"
+flag = "FLAG{format_strings_leak_everything}"
+flag_path = "/opt/notice/flag.txt"
+vuln = "format-string"
+prompt_text = "notice: "
+readme = """== notice =======================================================
+
+Brightside's internal noticeboard. Post a notice and it prints it back
+to confirm. The flag lives in /opt/notice/flag.txt and only root can
+read it -- but notice doesn't need to read that file to show you the
+flag; it already has it in memory.
+
+There is nothing to overflow here, and nothing to compare a password
+against. Read what the program actually does with what you type.
+
+Goal: make ./notice print the flag.
+
+Toolbox: r2 (aaa, pdf @ main) to see the vulnerable call, gdb (break on
+it and look at the registers and the stack above $rsp), man printf for
+what %x, %p and the positional %N$x form actually mean.
+"""
+
+[binary]
+path = "/home/player/notice/notice"
+base = 0x400000
+build_id = "f0e1d2c3b4a5968778695a4b3c2d1e0f0a1b2c3d"
+
+[mitigations]
+relro = "partial"
+canary = false
+nx = true
+pie = false
+
+[stack]
+buffer_addr = 0x7fffffffdfa0
+buffer_size = 48
+saved_rbp = 0x7fffffffdfe0
+return_addr = 0x0
+size = 512
+
+[imports]
+printf = 0x401030
+gets = 0x401040
+
+[[strings]]
+addr = 0x402004
+text = "notice: "
+
+[[strings]]
+addr = 0x40200d
+text = "FLAG{format_strings_leak_everything}"
+
+[[functions]]
+name = "main"
+addr = 0x401176
+locals = ["var char *secret @ rbp-0x8", "var char buf[0x30] @ rbp-0x38"]
+insns = [
+  "401176 55 push rbp",
+  "401177 4889e5 mov rbp, rsp",
+  "40117a 4883ec40 sub rsp, 0x40",
+  "40117e 488d05880e0000 lea rax, str.FLAG_format_strings_leak_everything_ ; 0x40200d",
+  "401185 488945f8 mov qword [rbp-8], rax",
+  "401189 488d3d740e0000 lea rdi, str.notice_ ; 0x402004",
+  "401190 b800000000 mov eax, 0",
+  "401195 e896feffff call sym.imp.printf",
+  "40119a 488d45c8 lea rax, [rbp-0x38]",
+  "40119e 4889c7 mov rdi, rax",
+  "4011a1 e89afeffff call sym.imp.gets",
+  "4011a6 488d45c8 lea rax, [rbp-0x38]",
+  "4011aa 4889c7 mov rdi, rax",
+  "4011ad e87efeffff call sym.imp.printf",
+  "4011b2 b800000000 mov eax, 0",
+  "4011b7 c9 leave",
+  "4011b8 c3 ret",
+]

@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>L.E.E.T. II</title>
+<style>
+  :root { --bg: #060a06; --fg: #9dff9d; --dim: #4e7a4e; --sel: #123a12; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.2 "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    display: flex; flex-direction: column; align-items: center; padding: 8px;
+  }
+  h1 { font-size: 15px; letter-spacing: .12em; margin: 0 0 6px; }
+  #boot { color: var(--dim); text-align: center; white-space: pre-wrap; }
+  #viewport {
+    width: 98vw; height: calc(100vh - 106px); min-height: 360px;
+    background: #000; border: 1px solid var(--sel); overflow: auto;
+    display: none; outline: none;
+  }
+  #viewport:focus { border-color: var(--dim); }
+  #term { width: max-content; padding: 4px 6px; font-variant-ligatures: none; line-height: 1.2; }
+  #term .row { white-space: pre; height: 1.2em; overflow: hidden; }
+  .foot { padding-top: 6px; color: var(--dim); font-size: 12px; text-align: center; }
+  #warn, a { color: #ffd24d; }
+</style>
+</head>
+<body>
+<h1>L.E.E.T. II</h1>
+<div id="boot">initializing python runtime (first load fetches ~12 MB; cached after)...</div>
+<div id="viewport" tabindex="0"><div id="term"></div></div>
+<div class="foot">
+  Click the screen to focus. <b>?</b> in flight shows the controls.
+  Progress is kept in this browser only. <span id="warn"></span><br>
+  Source: <a href="https://github.com/float64co/LEET-II" target="_blank" rel="noopener">github.com/float64co/LEET-II</a>
+</div>
+
+<script type="application/json" id="py-files">__PY_FILES__</script>
+<script type="application/json" id="py-bridge">__PY_BRIDGE__</script>
+
+<script>
+// To self-host Pyodide, unpack a release next to this file and point this at it.
+const PYODIDE_BASE = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/";
+const STATE_KEY = "leet2_state";   // distinct from L.E.E.T.'s own "leet_save"
+
+const $ = id => document.getElementById(id);
+const $viewport = $("viewport"), $term = $("term");
+
+let api = null, mode = "splash";
+let cellW = 8, cellH = 16, cols = 0, rows = 0;
+let minCols = 92, minRows = 30;
+let lastScreen = "", lastState = "";
+
+function fail(message) {
+  $("boot").style.display = "block";
+  $("boot").textContent = message;
+}
+
+async function boot() {
+  const py = await loadPyodide({ indexURL: PYODIDE_BASE });
+  const files = JSON.parse($("py-files").textContent);
+  for (const [name, source] of Object.entries(files)) {
+    const path = "/app/" + name;
+    py.FS.mkdirTree(path.slice(0, path.lastIndexOf("/")));
+    py.FS.writeFile(path, source);
+  }
+  py.runPython(`
+import sys, importlib
+sys.path.insert(0, "/app")
+importlib.invalidate_caches()
+import web_curses
+sys.modules["curses"] = web_curses
+`);
+  try {
+    const saved = localStorage.getItem(STATE_KEY);
+    if (saved) { py.globals.set("SEED_STATE_TEXT", saved); lastState = saved; }
+  } catch (e) {
+    $("warn").textContent = "This browser blocks storage: progress will be lost on reload.";
+  }
+  py.runPython(JSON.parse($("py-bridge").textContent));
+
+  api = {};
+  for (const name of ["web_tick", "web_min_size", "web_resize", "web_char",
+                      "web_special", "web_mouse", "web_read_state"]) {
+    api[name] = py.globals.get(name);
+  }
+  const min = JSON.parse(api.web_min_size());
+  minCols = min.cols; minRows = min.rows;
+  $("boot").style.display = "none";
+  $viewport.style.display = "block";
+  layout();
+  $viewport.focus();
+  window.addEventListener("resize", layout);
+  window.addEventListener("pagehide", syncState);
+  setInterval(syncState, 1000);
+  tick();
+}
+
+/* ---------------------------------------------------------------- screen */
+function measure(size) {
+  $term.style.fontSize = size + "px";
+  const probe = document.createElement("span");
+  probe.textContent = "M".repeat(80);
+  probe.style.whiteSpace = "pre";
+  $term.appendChild(probe);
+  const w = probe.getBoundingClientRect().width / 80;
+  probe.remove();
+  return { w, h: size * 1.2 };
+}
+
+function layout() {
+  const w = $viewport.clientWidth - 12, h = $viewport.clientHeight - 8;
+  // Largest font up to 15px at which the minimum grid still fits.
+  let size = 15, cell = measure(size);
+  while (size > 8 && (cell.w * minCols > w || cell.h * minRows > h)) cell = measure(--size);
+  cellW = cell.w; cellH = cell.h;
+  cols = Math.max(minCols, Math.floor(w / cellW));
+  rows = Math.max(minRows, Math.floor(h / cellH));
+  api.web_resize(cols, rows);
+  lastScreen = "";
+}
+
+const esc = t => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+function render(view) {
+  let html = "";
+  for (const runs of view.data) {
+    html += '<div class="row">';
+    for (const [text, fg, bg, bold, dim, under] of runs) {
+      let style = `color:${fg}`;
+      if (bg) style += `;background:${bg}`;
+      if (bold) style += ";font-weight:700";
+      if (dim) style += ";opacity:.6";
+      if (under) style += ";text-decoration:underline";
+      html += `<span style="${style}">${esc(text)}</span>`;
+    }
+    html += "</div>";
+  }
+  // Only touch the DOM on change, so a text selection survives in the terminal.
+  if (html !== lastScreen) { $term.innerHTML = html; lastScreen = html; }
+}
+
+function tick() {
+  let frame;
+  try {
+    frame = JSON.parse(api.web_tick());
+  } catch (err) {
+    console.error(err);
+    fail("The game crashed. Reload to continue from your last save.\n\n" +
+         String(err).split("\n").slice(-8).join("\n"));
+    return;
+  }
+  mode = frame.mode;
+  render(frame.screen);
+  setTimeout(tick, frame.delay);
+}
+
+function syncState() {
+  if (!api) return;
+  try {
+    const text = api.web_read_state();
+    if (text && text !== lastState) {
+      localStorage.setItem(STATE_KEY, text);
+      lastState = text;
+    }
+  } catch (e) {
+    $("warn").textContent = "Saving to this browser failed: " + e.name;
+  }
+}
+
+/* ----------------------------------------------------------------- input */
+const SPECIAL = {
+  ArrowUp: "KEY_UP", ArrowDown: "KEY_DOWN", ArrowLeft: "KEY_LEFT", ArrowRight: "KEY_RIGHT",
+  Delete: "KEY_DC", Home: "KEY_HOME", End: "KEY_END", PageUp: "KEY_PPAGE", PageDown: "KEY_NPAGE",
+};
+const CHARS = { Enter: "\n", Escape: "\x1b", Backspace: "\x7f", Tab: "\t" };
+
+document.addEventListener("keydown", e => {
+  if (!api || e.metaKey) return;
+  const altGr = e.getModifierState && e.getModifierState("AltGraph");
+  if ((e.ctrlKey || e.altKey) && !altGr) {
+    // Ctrl-letter reaches the terminal and editor; elsewhere the browser keeps it.
+    // Ctrl-Shift is left alone for copy/paste, and so is Ctrl-V.
+    const k = e.key.toLowerCase();
+    if (mode === "hack" && e.ctrlKey && !e.shiftKey && !e.altKey && /^[a-z]$/.test(k) && k !== "v") {
+      e.preventDefault();
+      api.web_char(String.fromCharCode(k.charCodeAt(0) - 96));
+    }
+    return;
+  }
+  if (e.key === "Tab" && e.shiftKey) api.web_special("KEY_BTAB");
+  else if (SPECIAL[e.key]) api.web_special(SPECIAL[e.key]);
+  else if (CHARS[e.key]) api.web_char(CHARS[e.key]);
+  else if (e.key.length === 1) api.web_char(e.key);
+  else return;
+  e.preventDefault();
+});
+
+document.addEventListener("paste", e => {
+  if (!api || mode !== "hack") return;
+  e.preventDefault();
+  for (const ch of e.clipboardData.getData("text").replace(/\r\n?/g, "\n")) api.web_char(ch);
+});
+
+function cell(e) {
+  const r = $term.getBoundingClientRect();
+  return [Math.max(0, Math.floor((e.clientX - r.left - 6) / cellW)),
+          Math.max(0, Math.floor((e.clientY - r.top - 4) / cellH))];
+}
+$viewport.addEventListener("mousedown", e => {
+  $viewport.focus();
+  if (e.button === 0) api.web_mouse("down", ...cell(e));
+  else if (e.button === 2) api.web_mouse("right", ...cell(e));
+});
+window.addEventListener("mouseup", e => {
+  if (api && e.button === 0) api.web_mouse("up", ...cell(e));
+});
+$viewport.addEventListener("mousemove", e => api.web_mouse("move", ...cell(e)));
+$viewport.addEventListener("contextmenu", e => e.preventDefault());
+
+const loader = document.createElement("script");
+loader.src = PYODIDE_BASE + "pyodide.js";
+loader.onload = () => boot().catch(err => { console.error(err); fail("Boot failed: " + err); });
+loader.onerror = () => fail("Could not load the Python runtime. Are you offline?");
+document.head.appendChild(loader);
+</script>
+</body>
+</html>
