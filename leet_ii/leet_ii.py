@@ -13,7 +13,8 @@ Docked, the Terminal drops you into omnisploit. Each exploit target
 you complete there raises your hacking level. In flight, locking a pirate or trader with
 Tab autohacks it (police are immune): a hacked ship pays far more than a wrecked one.
 
-Pirates prey on traders, and a trader you save pays you. Planets you hold pay
+Pirates prey on traders, and a trader you save pays you. Lock a trader and
+press H to hail them: merchants, smugglers, tinkers and information brokers. Planets you hold pay
 too, until a rival raids one and you have to land and defend it. The
 Terminal's `clearwanted` command wipes police records, up to one star for
 every two hacking levels.
@@ -572,6 +573,9 @@ class NPCShip:
     provoked: bool = False  # a pirate the player has shot
     raided: object = None   # a pirate: the trader it has fired on
     distress: bool = False  # a trader under fire, owing a rescue reward
+    hailed: bool = False    # a trader you've spoken to: never autohacked
+    rescued: bool = False   # a trader you've saved
+    profile: object = None  # who is flying it, made at the first hail
 
 
 @dataclass
@@ -626,6 +630,12 @@ def buy_cost(price, qty):
 def sale_value(price, qty):
     """What qty tonnes fetch, each cheaper than the last, less the spread."""
     return int(MARKET_SPREAD * price * (1 - MARKET_IMPACT ** -qty) / (MARKET_IMPACT - 1) + 1e-6)
+
+
+def note_low(row):
+    """Remember, and return, the lowest price this market has shown."""
+    row["low"] = min(row.get("low", row["price"]), row["price"])
+    return row["low"]
 
 
 def ship_stats(ship_type):
@@ -1222,6 +1232,7 @@ class SpaceGame:
         s = self.sys()
         row = s.market[ctx["commodity"]]
         name = ctx["commodity"]
+        note_low(row)  # before this trade moves the price
         if ctx["action"] == "buy":
             qty = min(qty, int(row["stock"]), self.full_cargo_capacity() - self.cargo_used())
             if qty <= 0:
@@ -1252,6 +1263,7 @@ class SpaceGame:
                 del self.cargo[name]
             row["stock"] += qty
             row["price"] /= MARKET_IMPACT ** qty
+            note_low(row)
             self.credits += revenue
             self._msg(f"Sold {qty}t {name} for {revenue}cr.")
 
@@ -1861,6 +1873,7 @@ class SpaceGame:
         if any(n.kind == "Pirate" and n.alive and n.raided is trader for n in self.npcs):
             return
         trader.distress = False
+        trader.rescued = True
         reward = random.randint(*RESCUE_REWARD)
         self.credits += reward
         self._msg(f"Trader rescued. They pay you {reward}cr.")
@@ -4327,6 +4340,9 @@ def locked_speed_factor(level):
     return 1.0 - (1.0 - LOCK_MIN_SPEED) * min(level, top) / top
 
 
+CP_RAIDED = 15  # orange: a system where a planet of yours is under attack
+
+
 def init_space_colors():
     """The space view's color pairs. The ground war reuses the same pair numbers with
     different meanings, so this has to be re-run after every landing."""
@@ -4339,6 +4355,8 @@ def init_space_colors():
                         (CP_POLICE, curses.COLOR_BLUE)):
         curses.init_pair(pair, color, -1)
     curses.init_pair(CP_REVERSE, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    # 8-colour terminals have no orange; yellow is the nearest.
+    curses.init_pair(CP_RAIDED, 208 if getattr(curses, "COLORS", 8) >= 256 else curses.COLOR_YELLOW, -1)
 
 
 # --------------------------------------------------------------------------
@@ -4429,6 +4447,152 @@ class GroundCampaign(GroundGame):
 # The commander's game
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Traders you can hail
+# --------------------------------------------------------------------------
+
+HAIL_RANGE = 600.0
+
+# Within one system every trader asks more than a station ever pays and pays
+# less than you could ever have paid a station, so dealing with them can't be
+# turned into a money loop. Asks work from the highest of the usual price, the
+# current price and the price when you first said hello. Bids work from the
+# usual price or the lowest the station has ever shown, whichever is less.
+TRADER_ASK_FLOOR = 0.93
+TRADER_BID_CEILING = 0.92
+RESCUED_DISCOUNT = 0.75  # on services and intel from a trader you saved
+
+# Tinkers charge well over station rates for working out in the black.
+TINKER_SERVICES = {
+    "fuel":    ("Refuel", 30),            # per LY
+    "hull":    ("Patch the hull", 8),     # per point
+    "missile": ("Load a missile", 800),
+}
+BROKER_TIPS = {
+    "market": ("Market tip: where it sells best", 250),
+    "raid":   ("Raid intel: which planet is next", 400),
+    "planet": ("Planet intel: a soft target", 150),
+}
+
+TRADER_FIRST = (
+    "Vex", "Nyx", "Juno", "Kade", "Mara", "Zed", "Ilse", "Rook", "Sable", "Dex",
+    "Oona", "Cass", "Tamsin", "Brix", "Yuri", "Kestrel", "Anouk", "Lazlo", "Priya", "Moss",
+    "Wren", "Ozzy", "Hana", "Silas", "Neon", "Ferro", "Quill", "Ada", "Corvin", "Ximena",
+    "Tolliver", "Indra", "Bishop", "Marisol", "Static", "Gideon", "Pixel", "Noor", "Halcyon", "Jax",
+    "Ripley", "Sunny", "Vesper", "Kofi", "Ingrid", "Mako", "Delphine", "Ozone",
+)
+TRADER_LAST = (
+    "Okonkwo", "Vantablack", "Ishikawa", "Mercer", "Null", "Delacroix", "Raze", "Ferrante",
+    "Qureshi", "Halloran", "Zeroday", "Vance", "Korsakov", "Abara", "Sato", "Greaves",
+    "Lindqvist", "Marrow", "Cipher", "Montoya", "Kuznetsov", "Blackwell", "Tan", "Overflow",
+    "Rask", "Adeyemi", "Voss", "Nakamura", "Salt", "Petrakis", "Doyle", "Segfault",
+    "Marchetti", "Ironside", "Bao", "Underhill", "Castellanos", "Wire", "Oyelaran", "Frost",
+)
+TRADER_SHIPS = (
+    "Margin Call", "Cold Boot", "Second Mortgage", "Packet Loss", "Honest Mistake",
+    "Rent Is Due", "Grey Market Gospel", "Dead Man's Switch", "Lucky Thirteen", "Soft Reset",
+    "No Refunds", "Chrome Saint", "Plausible Denial", "Overdraft", "Night Shift",
+    "Terms Of Service", "Kernel Panic", "The Long Con", "Paper Tiger", "Warranty Void",
+    "Sunk Cost", "Ghost In The Hold", "Hard Fork", "Last Orders", "Mother's Pension",
+    "Race Condition", "Clean Title", "Black Friday", "Fallback Plan", "Static Hymn",
+    "Acceptable Loss", "Zero Percent APR",
+)
+
+TRADER_LINES = {
+    "Merchant": (
+        "{name} of the {ship}. Everything's legit, I have receipts. Some of them are even mine.",
+        "You've reached the {ship}. {name} here. Prices are fair, the universe isn't. Talk fast.",
+        "{name}, independent hauler. Three corps tried to buy me out. I'm still counting the offers.",
+        "This is {ship}. I move crates, I don't ask what dreams are in them. {name}, at your service.",
+        "Signal's clean, for once. {name} on the {ship}. Cash, credit, no neural IOUs.",
+        "Name's {name}. My ship's older than your firmware and twice as reliable. Shopping?",
+        "{ship} copies. I've got cargo, debts and a very patient creditor drone. Help me with two.",
+        "Hey, chrome. {name} here. Buy something before the algorithm reprices it again.",
+    ),
+    "Smuggler": (
+        "Keep this channel dark. {name}, {ship}. You never saw me and I never had inventory.",
+        "{name}. Don't say my name on an open band. ...I just did. Buy something, quick.",
+        "The {ship} doesn't exist, choom. Neither does this manifest. Interested?",
+        "Customs calls me a person of interest. I call me {name}. What are you carrying?",
+        "Encrypted hello from {name}. If you're a cop, this is performance art.",
+        "My transponder says I'm a dairy freighter. I'm {name}. Want some very unusual milk?",
+        "No logs, no names, no refunds. Fine, one name: {name}. Open your hold.",
+        "{ship} here. The goods are hot, the coffee's cold, and {name} doesn't haggle twice.",
+    ),
+    "Tinker": (
+        "{name}, rolling repair bay. Your hull's making a noise I can hear from here.",
+        "Greetings from the {ship}. I fix what the dealerships void the warranty on. {name}.",
+        "Name's {name}. I've welded worse than you at speeds you wouldn't believe. Hold still.",
+        "You look like deferred maintenance. {name} here, and I take credits.",
+        "{ship} on channel. Fuel, patches, boom-sticks. {name} doesn't judge your duct tape.",
+        "I jailbroke my own left arm to reach your coolant line. {name}. What's broken?",
+        "Hardware's honest, software lies. {name} of the {ship}, here for the hardware.",
+        "Smells like burnt capacitor out there. Is that you? Let {name} have a look.",
+    ),
+    "Broker": (
+        "{name}. I don't haul cargo, I haul secrets. Lighter, better margins.",
+        "I already know your credit balance. Relax. {name}, information broker.",
+        "The {ship} is mostly antennae. {name} is mostly ears. What do you want to know?",
+        "Everyone leaks, commander. I just stand downstream. Call me {name}.",
+        "You hailed me. Statistically, you would. {name}. Let's talk data.",
+        "Three megacorps want my drives wiped. You can rent what's on them first. {name}.",
+        "Truth is a subscription now. {name} offers it pay-as-you-go.",
+        "My implants hear every unencrypted sneeze in this system. {name}. Ask me something.",
+    ),
+}
+TRADER_THANKS = (
+    "You pulled that pirate off my back. I don't forget that. Friends' rates.",
+    "I owe you my hull, and I pay my debts. Cheaper for you today.",
+    "Still breathing because of you. The meter's running slow, just this once.",
+)
+TRADER_REFUSALS_SHOT = (
+    "You shot at me. Lose this frequency.",
+    "My lawyer is a point-defence turret. Channel closed.",
+)
+TRADER_REFUSALS_WANTED = (
+    "Your face is on every police feed in the sector. Not today.",
+    "I like my licence. You're radioactive, Fugitive. Out.",
+)
+
+
+def trader_offers(kind):
+    """(goods they sell, goods they want), each {commodity: [tonnes, factor]}."""
+    legal = [c["name"] for c in COMMODITIES if not c["illegal"] and c["cat"] != "rare"]
+    hot = [c["name"] for c in COMMODITIES if c["illegal"] or c["cat"] == "rare"]
+
+    def pick(pool, count, tonnes, factor):
+        return {name: [random.randint(*tonnes), round(random.uniform(*factor), 3)]
+                for name in random.sample(pool, count)}
+
+    if kind == "Merchant":
+        sells = pick(legal, random.randint(3, 4), (5, 25), (0.95, 1.08))
+        wants = pick([n for n in legal if n not in sells], 3, (5, 20), (0.86, TRADER_BID_CEILING))
+    elif kind == "Smuggler":
+        sells = pick(hot, 2, (2, 8), (0.95, 1.2))
+        wants = pick([n for n in hot if n not in sells], 1, (3, 10), (0.90, TRADER_BID_CEILING))
+        wants.update(pick([n for n in legal if COMMODITY_BY_NAME[n]["cat"] == "tech"], 1,
+                          (3, 8), (0.86, TRADER_BID_CEILING)))
+    elif kind == "Tinker":
+        sells = {}
+        wants = pick(["Machinery", "Alloys", "Computers", "Robots"], 2, (3, 12),
+                     (0.88, TRADER_BID_CEILING))
+    else:  # Broker
+        sells = {}
+        wants = pick(["Computers", "Gold", "Gem-Stones", "Luxuries"], 1, (1, 5),
+                     (0.88, TRADER_BID_CEILING))
+    return sells, wants
+
+
+def make_trader():
+    kind = random.choices(("Merchant", "Smuggler", "Tinker", "Broker"), (45, 20, 20, 15))[0]
+    name = f"{random.choice(TRADER_FIRST)} {random.choice(TRADER_LAST)}"
+    ship = random.choice(TRADER_SHIPS)
+    sells, wants = trader_offers(kind)
+    return dict(kind=kind, name=name, ship=ship, sells=sells, wants=wants,
+                intro=random.choice(TRADER_LINES[kind]).format(name=name, ship=ship),
+                hail_prices=None, intel=[])
+
+
 class Game(SpaceGame):
     def __init__(self, stdscr, commander_name, load_data=None):
         self.campaign = None
@@ -4436,6 +4600,8 @@ class Game(SpaceGame):
         self.landing_report = []
         self.hack_terminal = None
         self.hack = None  # upload in progress: dict(target, ticks, total)
+        self.trade = None  # open channel: dict(npc, refusal, thanks, index)
+        self.raid_target = None  # planet a broker has named as next
         self.holdings_clock = 0
         self.pay_ticks = 0
         self.next_raid = None
@@ -4464,12 +4630,14 @@ class Game(SpaceGame):
         self.holdings_clock = self.clock
         self.pay_ticks = d.get("pay_ticks", 0)
         self.next_raid = d.get("next_raid")
+        self.raid_target = d.get("raid_target")
 
     def to_dict(self):
         d = super().to_dict()
         d["planets"] = self.planets
         d["pay_ticks"] = self.pay_ticks
         d["next_raid"] = self.next_raid
+        d["raid_target"] = self.raid_target
         return d
 
     def save(self):
@@ -4490,6 +4658,281 @@ class Game(SpaceGame):
 
     def altitude(self, planet):
         return math.dist((self.px, self.py, self.pz), planet["pos"]) - planet["radius"]
+
+    def _handle_key(self, key):
+        if self.mode == "trade":
+            if key != curses.KEY_MOUSE:
+                self._key_trade(key)
+        else:
+            super()._handle_key(key)
+
+    # -------------------------------------------------------------- hailing
+
+    def _hail(self):
+        target = self._get_npc(self.target_id)
+        if not target:
+            self._msg("No target locked - press Tab.")
+        elif target.kind != "Trader":
+            self._msg("Only traders answer a hail.")
+        elif self._range_to(target) > HAIL_RANGE:
+            self._msg("Out of hailing range.")
+        else:
+            self._open_trade(target)
+
+    def _open_trade(self, npc):
+        if npc.profile is None:
+            npc.profile = make_trader()
+        trader = npc.profile
+        # Saying hello takes them off the menu: no autohack from here on.
+        npc.hailed = True
+        if self.hack and self.hack["target"] == npc.id:
+            self.hack = None
+            self._msg("Upload cancelled - you're talking now.")
+        refusal = None
+        if npc.provoked or npc.hostile_to_player:
+            refusal = random.choice(TRADER_REFUSALS_SHOT)
+        elif self.legal_status == LEGAL_FUGITIVE and trader["kind"] != "Smuggler":
+            refusal = random.choice(TRADER_REFUSALS_WANTED)
+        if trader["hail_prices"] is None:
+            trader["hail_prices"] = {n: row["price"] for n, row in self.sys().market.items()}
+        self.trade = dict(npc=npc, refusal=refusal, index=0,
+                          thanks=random.choice(TRADER_THANKS) if npc.rescued else None)
+        self.mouse_screen = None
+        self.mouse_engaged = False
+        self.mode = "trade"
+
+    def _trader_price(self, commodity, side):
+        """What they ask ("buy") or pay ("sell") per tonne."""
+        trader = self.trade["npc"].profile
+        row = self.sys().market[commodity]
+        if side == "buy":
+            seen = (row["baseline"], row["price"], trader["hail_prices"][commodity])
+            factor = trader["sells"][commodity][1]
+            if self.trade["npc"].rescued:
+                factor *= 0.95
+            return max(seen) * max(factor, TRADER_ASK_FLOOR)
+        return min(row["baseline"], note_low(row)) * min(trader["wants"][commodity][1], TRADER_BID_CEILING)
+
+    def _service_cost(self, key):
+        """(cost, amount) for a tinker's service, or (0, 0) if nothing to do."""
+        rate = TINKER_SERVICES[key][1] * (RESCUED_DISCOUNT if self.trade["npc"].rescued else 1)
+        if key == "fuel":
+            amount = max(0.0, self.full_max_fuel() - self.fuel)
+        elif key == "hull":
+            amount = max(0.0, self.max_hull - self.hull)
+        else:
+            amount = 1 if self.missiles < self.missile_mounts else 0
+        return (max(1, math.ceil(amount * rate)), amount) if amount > 0.05 else (0, 0)
+
+    def _tip_cost(self, key):
+        return int(BROKER_TIPS[key][1] * (RESCUED_DISCOUNT if self.trade["npc"].rescued else 1))
+
+    def _trade_rows(self):
+        """Selectable rows as (section, key)."""
+        if self.trade["refusal"]:
+            return [("leave", None)]
+        trader = self.trade["npc"].profile
+        rows = [("buy", n) for n in trader["sells"]]
+        rows += [("sell", n) for n in trader["wants"]]
+        if trader["kind"] == "Tinker":
+            rows += [("service", k) for k in TINKER_SERVICES]
+        if trader["kind"] == "Broker":
+            rows += [("tip", k) for k in BROKER_TIPS]
+        return rows + [("leave", None)]
+
+    def _key_trade(self, key):
+        rows = self._trade_rows()
+        if key == curses.KEY_UP:
+            self.trade["index"] = (self.trade["index"] - 1) % len(rows)
+        elif key == curses.KEY_DOWN:
+            self.trade["index"] = (self.trade["index"] + 1) % len(rows)
+        elif key in BACK_KEYS:
+            self._close_trade()
+        elif key in (10, 13, curses.KEY_ENTER):
+            section, item = rows[self.trade["index"]]
+            if section in ("buy", "sell"):
+                self._begin_qty(section, item, "trade")
+            elif section == "service":
+                self._buy_service(item)
+            elif section == "tip":
+                self._buy_tip(item)
+            else:
+                self._close_trade()
+
+    def _close_trade(self):
+        self.trade = None
+        self.mode = "flight"
+        self._msg("Channel closed.")
+
+    def _commit_qty(self):
+        if self.qty_ctx["return_mode"] != "trade":
+            super()._commit_qty()
+            return
+        self.mode = "trade"
+        qty = int(self.qty_buffer or 0)
+        if qty <= 0:
+            return
+        name, side = self.qty_ctx["commodity"], self.qty_ctx["action"]
+        trader = self.trade["npc"].profile
+        offer = trader["sells" if side == "buy" else "wants"][name]
+        price = self._trader_price(name, side)
+        if side == "buy":
+            qty = min(qty, offer[0], self.full_cargo_capacity() - self.cargo_used(),
+                      int(self.credits / price))
+            while qty > 0 and math.ceil(qty * price) > self.credits:
+                qty -= 1
+            if qty <= 0:
+                self._msg("Can't buy that - check stock, cargo space and credits.")
+                return
+            cost = math.ceil(qty * price)
+            self.credits -= cost
+            self.cargo[name] = self.cargo.get(name, 0) + qty
+            offer[0] -= qty
+            self._msg(f"Bought {qty}t {name} for {cost}cr.")
+        else:
+            consigned = self.consigned(name)
+            qty = min(qty, offer[0], self.cargo.get(name, 0) - consigned)
+            if qty <= 0:
+                self._msg("That cargo belongs to a delivery contract." if consigned
+                          else "Nothing you can sell them there.")
+                return
+            revenue = int(qty * price)
+            self.credits += revenue
+            self.cargo[name] -= qty
+            if not self.cargo[name]:
+                del self.cargo[name]
+            offer[0] -= qty
+            self._msg(f"Sold {qty}t {name} for {revenue}cr.")
+
+    def _buy_service(self, key):
+        cost, amount = self._service_cost(key)
+        if not cost:
+            self._msg("Nothing there needs doing.")
+        elif cost > self.credits:
+            self._msg("Not enough credits.")
+        else:
+            self.credits -= cost
+            if key == "fuel":
+                self.fuel = self.full_max_fuel()
+            elif key == "hull":
+                self.hull = self.max_hull
+            else:
+                self.missiles += 1
+            self._msg(f"{TINKER_SERVICES[key][0]}: done for {cost}cr.")
+
+    def _buy_tip(self, key):
+        cost = self._tip_cost(key)
+        if cost > self.credits:
+            self._msg("Not enough credits.")
+            return
+        found, text = getattr(self, f"_tip_{key}")()
+        if found:  # no charge when there is nothing to tell
+            self.credits -= cost
+            intel = self.trade["npc"].profile["intel"]
+            if text not in intel:
+                intel.append(text)
+        self._msg(text)
+
+    def _tip_market(self):
+        carried = [n for n, q in self.cargo.items() if q > self.consigned(n)]
+        goods = carried or [c["name"] for c in COMMODITIES if not c["illegal"]]
+        here = self.current_system_name
+        reach = [n for n in self.galaxy if n != here and self._dist_ly(n) <= self.full_max_fuel()]
+        if not reach:
+            return False, "Broker: nowhere you can reach in one jump."
+
+        def margin(pair):
+            system, good = pair
+            return self.galaxy[system].market[good]["price"] / COMMODITY_BY_NAME[good]["base"]
+
+        system, good = max(((s, g) for s in reach for g in goods), key=margin)
+        each = sale_value(self.galaxy[system].market[good]["price"], 1)
+        return True, f"Sell {good} at {system} ({self._dist_ly(system):.1f} LY): about {each}cr a tonne."
+
+    def _tip_raid(self):
+        if self.raid():
+            return False, "Broker: you're already under attack. That one's free."
+        owned = self.holdings()
+        if not owned:
+            return False, "Broker: you hold nothing worth raiding."
+        if self.next_raid is None:
+            self.next_raid = self.clock + random.randint(*RAID_GAP_TICKS)
+        if self.raid_target not in [p["name"] for _, p in owned]:
+            self.raid_target = random.choice(owned)[1]["name"]
+        system = next(s for s, p in owned if p["name"] == self.raid_target)
+        return True, (f"Raiders have marked {self.raid_target} in {system}. "
+                      f"Expect them in about {clock_text(self.next_raid - self.clock)}.")
+
+    def _tip_planet(self):
+        targets = [(p["tier"], self._dist_ly(s), p["name"], s)
+                   for s, planets in self.planets.items() for p in planets if not p["liberated"]]
+        if not targets:
+            return False, "Broker: there's nothing left to take."
+        # easiest first among those one jump away, else the nearest of all
+        near = [t for t in targets if t[1] <= self.full_max_fuel()]
+        tier, dist, planet, system = min(near) if near else min(targets, key=lambda t: t[1])
+        where = "this system" if system == self.current_system_name else f"{system} ({dist:.1f} LY)"
+        return True, (f"{planet} in {where} is held by "
+                      f"{OUTFITS[tier]['name']}, tier {tier + 1}.")
+
+    def draw(self):
+        trading = self.mode == "trade" or (self.mode == "qty_input"
+                                           and self.qty_ctx["return_mode"] == "trade")
+        max_y, max_x = self.stdscr.getmaxyx()
+        if not trading or max_y < SPACE_MIN_TERM_H or max_x < SPACE_MIN_TERM_W:
+            super().draw()
+            return
+        self.stdscr.erase()
+        self._draw_trade(max_x, max_y)
+        if self.mode == "qty_input":
+            self._draw_qty_prompt(max_x, max_y)
+        self.stdscr.refresh()
+
+    def _draw_trade(self, max_x, max_y):
+        trader = self.trade["npc"].profile
+        hud = curses.color_pair(CP_HUD)
+        head = curses.color_pair(CP_HUD) | curses.A_BOLD
+        warn = curses.color_pair(CP_WARN)
+        self._draw_menu_frame(max_x, max_y, f"Hailing the {trader['ship']}")
+        self._safe_addstr(3, 4, f"{trader['name']}, {trader['kind']}", head)
+        row = 5
+        speech = [self.trade["refusal"] or trader["intro"]]
+        if self.trade["thanks"] and not self.trade["refusal"]:
+            speech.append(self.trade["thanks"])
+        for text in speech:
+            for line in textwrap.wrap(f'"{text}"', min(max_x - 8, 80)):
+                self._safe_addstr(row, 4, line, warn)
+                row += 1
+        section_names = {"buy": f"{'THEY SELL':<26}{'each':>8}{'stock':>8}{'held':>7}",
+                         "sell": f"{'THEY BUY':<26}{'each':>8}{'wants':>8}{'held':>7}",
+                         "service": "SERVICES", "tip": "INTEL"}
+        previous = None
+        for i, (section, item) in enumerate(self._trade_rows()):
+            if section != previous:
+                row += 1 if previous is None or section == "leave" else 0
+                if section in section_names:
+                    self._safe_addstr(row, 4, section_names[section], head)
+                    row += 1
+                previous = section
+            if section in ("buy", "sell"):
+                offer = trader["sells" if section == "buy" else "wants"][item]
+                text = (f"  {item:<24}{self._trader_price(item, section):>8.1f}"
+                        f"{offer[0]:>8}{self.cargo.get(item, 0):>7}")
+            elif section == "service":
+                cost, _ = self._service_cost(item)
+                text = f"  {TINKER_SERVICES[item][0]:<24}{f'{cost}cr' if cost else '-':>8}"
+            elif section == "tip":
+                text = f"  {BROKER_TIPS[item][0]:<36}{f'{self._tip_cost(item)}cr':>8}"
+            else:
+                text = "  Close channel"
+            self._safe_addstr(row, 4, text, curses.A_REVERSE if i == self.trade["index"] else hud)
+            row += 1
+        # whatever intel you've paid for stays on screen, newest last
+        lines = [part for text in trader["intel"][-3:] for part in textwrap.wrap(text, max_x - 8)]
+        room = max_y - SPACE_BOTTOM_H - row - 1
+        for i, line in enumerate(lines[-room:] if room > 0 else []):
+            self._safe_addstr(row + 1 + i, 4, line, warn)
+        self._draw_bottombar(max_y, max_x)
 
     # ------------------------------------------------------------- holdings
 
@@ -4562,7 +5005,10 @@ class Game(SpaceGame):
         if self.next_raid is None:
             self.next_raid = self.clock + random.randint(*RAID_GAP_TICKS)
         elif self.clock >= self.next_raid:
-            system, planet = random.choice(owned)
+            # a broker may already have named it
+            system, planet = next((pair for pair in owned if pair[1]["name"] == self.raid_target),
+                                  None) or random.choice(owned)
+            self.raid_target = None
             here, there = self.sys(), self.galaxy[system]
             distance = math.hypot(there.x - here.x, there.y - here.y)
             planet["raid"] = self.clock + RAID_GRACE_TICKS + int(distance * RAID_TICKS_PER_LY)
@@ -4647,7 +5093,7 @@ class Game(SpaceGame):
     def _hackable_target(self):
         """The locked ship, if it can be hacked right now. Police are immune."""
         target = self._get_npc(self.target_id)
-        if (self.hack_level >= 1 and target and target.kind != "Police"
+        if (self.hack_level >= 1 and target and target.kind != "Police" and not target.hailed
                 and self._range_to(target) <= HACK_RANGE):
             return target
         return None
@@ -4661,7 +5107,8 @@ class Game(SpaceGame):
             return
         if not self.hack:
             self.hack = dict(target=target.id, ticks=0, total=hack_upload_ticks(self.hack_level))
-            self._msg("Uploading exploit - stay in range.")
+            self._msg("Uploading exploit - stay in range."
+                      + (" H to hail instead." if target.kind == "Trader" else ""))
         self.hack["ticks"] = min(self.hack["total"], self.hack["ticks"] + 1)
         # A finished upload waits here until there is energy to run it.
         if self.hack["ticks"] >= self.hack["total"] and self.energy >= HACK_ENERGY:
@@ -4737,7 +5184,9 @@ class Game(SpaceGame):
     def _key_flight(self, key):
         # D docks with whatever you're next to: a planet here, otherwise
         # station docking.
-        if key in (ord('d'), ord('D')) and self.altitude(self.nearest_planet()) <= LAND_RANGE:
+        if key in (ord('h'), ord('H')):
+            self._hail()
+        elif key in (ord('d'), ord('D')) and self.altitude(self.nearest_planet()) <= LAND_RANGE:
             self._try_land()
         else:
             super()._key_flight(key)
@@ -4975,7 +5424,7 @@ class Game(SpaceGame):
     def _draw_bottombar(self, max_y, max_x):
         super()._draw_bottombar(max_y, max_x)
         if self.mode == "flight":
-            hint = ("D:dock station/planet  G:map  ?:help  Q:menu  Mouse:aim(C)  Arrows:roll/pitch  "
+            hint = ("D:dock station/planet  H:hail  G:map  ?:help  Q:menu  Mouse:aim(C)  Arrows:roll/pitch  "
                     ",/.:throttle  Space:fire  M:missile  Tab:target  E:ecm")
             self._safe_addstr(max_y - SPACE_BOTTOM_H, 0, hint.ljust(max_x - 1),
                               curses.color_pair(CP_HUD))
@@ -4986,6 +5435,17 @@ class Game(SpaceGame):
             return
         w, h = min(max_x - 6, 70), min(max_y - 6, 24)
         x0, y0 = (max_x - w) // 2, (max_y - h) // 2
+        active = self.raid()
+        if active:
+            # redraw the raided system's mark in orange, over whatever was there
+            name = active[0]
+            system, map_w, map_h = self.galaxy[name], w - 4, h - 12
+            gx = x0 + 2 + int((system.x / GALAXY_W) * (map_w - 1))
+            gy = y0 + 2 + int((system.y / GALAXY_H) * (map_h - 1))
+            attr = curses.color_pair(CP_RAIDED) | curses.A_BOLD
+            if name == self._map_order[self.map_index]:
+                attr |= curses.A_REVERSE  # still shows as the selection
+            self._safe_addch(gy, gx, "@" if name == self.current_system_name else "*", attr)
         dest = self._map_order[self.map_index]
         planets = self.planets[dest]
         held = sum(1 for p in planets if p["liberated"])
@@ -5008,7 +5468,7 @@ class Game(SpaceGame):
             "  . / ,        throttle up / down",
             "  Space  M     fire laser / missile",
             "  Tab          cycle target (slows and hacks; not police)",
-            "  E            ECM burst",
+            "  E            ECM burst        H: hail the locked trader",
             "  D            dock at a station or planet (close and slow)",
             "  G            galaxy map                Q: pause / save",
             "",
