@@ -3,6 +3,8 @@
 The sequel to L.E.E.T.: trade and fight among the stars, land and take the
 planets, and hack pirates with exploits you work out in your ship's terminal.
 
+**Play it on the web: https://float64co.github.io/leet_ii/**
+
 ## Play in a terminal
 
     python3 leet_ii.py
