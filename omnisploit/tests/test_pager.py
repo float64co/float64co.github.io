@@ -168,3 +168,56 @@ class PagerTests(unittest.TestCase):
         keys(pg, "zZ!@#")
         self.assertEqual(pg.top, 0)
         self.assertFalse(pg.done)
+
+
+class WrapTests(unittest.TestCase):
+    def wrapped(self, text, width=10, height=3):
+        pg = Pager(text, "f")
+        pg.height, pg.width = height, width
+        return pg
+
+    def shown(self, pg):
+        return [row for _, _, row in pg.visible()]
+
+    def test_long_lines_wrap_and_nothing_is_lost(self):
+        pg = self.wrapped("abcdefghijKLMNOPQRSTuvw\n\nxy\n", height=10)
+        self.assertEqual(self.shown(pg), ["abcdefghij", "KLMNOPQRST", "uvw", "", "xy"])
+
+    def test_a_line_of_exactly_the_width_does_not_add_a_row(self):
+        self.assertEqual(self.shown(self.wrapped("a" * 10 + "\nb\n")), ["a" * 10, "b"])
+
+    def test_one_line_taller_than_the_screen_scrolls_row_by_row(self):
+        pg = self.wrapped("".join(str(i) * 10 for i in range(6)))
+        keys(pg, "j")
+        self.assertEqual(self.shown(pg), ["1" * 10, "2" * 10, "3" * 10])
+        keys(pg, "G")
+        self.assertEqual(self.shown(pg), ["3" * 10, "4" * 10, "5" * 10])
+        self.assertTrue(pg.at_end)
+        self.assertIn("lines 1-1/1", pg.status())
+
+    def test_search_goes_to_the_row_holding_the_match(self):
+        pg = self.wrapped("." * 30 + "HIT" + "." * 17 + "HIT\n" + "z\n" * 9)
+        keys(pg, "/HIT<CR>")
+        self.assertEqual(pg.top, 3)
+        keys(pg, "n")
+        self.assertEqual(pg.top, 5)
+        keys(pg, "N")
+        self.assertEqual(pg.top, 3)
+
+    def test_resize_keeps_the_same_text_at_the_top(self):
+        pg = self.wrapped("".join(chr(97 + i) * 10 for i in range(8)) + "\n" + "z\n" * 9)
+        keys(pg, "jjjj")
+        self.assertTrue(self.shown(pg)[0].startswith("e"))
+        pg.width = 20
+        self.assertIn("e", self.shown(pg)[0])
+        pg.width = 5
+        self.assertTrue(self.shown(pg)[0].startswith("e"))
+
+    def test_tabs_are_expanded_before_wrapping(self):
+        self.assertEqual(self.shown(self.wrapped("a\tbcd\n")), ["a       bc", "d"])
+
+    def test_empty_file_wraps_to_nothing(self):
+        pg = self.wrapped("")
+        self.assertEqual(self.shown(pg), [])
+        self.assertEqual(pg.status(), "f: (END)")
+

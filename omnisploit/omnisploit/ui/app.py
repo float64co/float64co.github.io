@@ -151,6 +151,7 @@ class App:
             self.open_editor(action[1], action[2])
         elif action[0] == "page":
             self.pager = Pager(action[1], action[2])
+            self.pager.width = self.scr.getmaxyx()[1]
             self.pager.height = max(self.scr.getmaxyx()[0] - 1, 1)  # correct before the first keypress, not just the first draw
 
     def open_editor(self, path: str | None, name: str) -> None:
@@ -275,17 +276,15 @@ class App:
         h, w = self.scr.getmaxyx()
         text_h = max(h - 1, 1)
         pg.height = text_h
-        for row in range(text_h):
-            idx = pg.top + row
-            if idx >= len(pg.lines):
-                continue  # less leaves trailing rows blank -- no '~' filler
-            line = pg.lines[idx]
-            attrs = [curses.A_NORMAL] * (len(line) + 1)
-            for s, e in pg.match_spans(line):
-                for c in range(s, min(e, len(attrs))):
+        pg.width = w
+        # less leaves trailing rows blank -- no '~' filler
+        for row, (idx, col, view) in enumerate(pg.visible()):
+            # matched on the whole line, so a hit split by the wrap is lit on both rows
+            attrs = [curses.A_NORMAL] * len(view)
+            for s, e in pg.match_spans(pg.lines[idx]):
+                for c in range(max(s - col, 0), min(e - col, len(view))):
                     attrs[c] = self.match
-            view = line[:w]
-            self._draw_styled(row, 0, view, attrs[:w])
+            self._draw_styled(row, 0, view, attrs)
         self._put(h - 1, 0, pg.status(), curses.A_BOLD)
         curses.curs_set(1 if pg.mode == "search" else 0)
         if pg.mode == "search":
