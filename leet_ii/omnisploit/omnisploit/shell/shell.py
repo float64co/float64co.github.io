@@ -860,8 +860,25 @@ class Shell:
             interp = first[2:].strip().split()
             if interp and interp[-1].rsplit("/", 1)[-1] in ("sh", "bash"):
                 return self.run_captured(body, argv[1:], name)
+            result = self._run_python_script(name, interp, argv[1:], stdin)
+            if result is not None:
+                return result
             return fail(f"bash: {name}: {first[2:].strip()}: bad interpreter: No such file or directory", 126)
         return fail(f"bash: {name}: cannot execute binary file: Exec format error", 126)
+
+    def _run_python_script(self, name: str, interp: list[str], args: list[str], stdin: bytes) -> "Result | None":
+        """Run a script whose shebang names Python, directly or through env; None if it doesn't."""
+        from .commands import REGISTRY
+
+        words = interp[1:] if interp and interp[0] in ("/usr/bin/env", "/bin/env") else interp
+        if not words or words[0].rsplit("/", 1)[-1] not in ("python", "python3"):
+            return None
+        # an interpreter given by path has to be there, as on a real system
+        if "/" in words[0] and not self.vfs.exists(words[0]):
+            return None
+        # found on $PATH, the script is known only by its bare name
+        script = name if "/" in name else self.find_in_path(name)[0]
+        return REGISTRY["python3"](self, words[1:] + [script] + args, stdin)
 
     # ------------------------------------------------------------ completion
     def complete(self, text: str) -> tuple[int, list[str]]:

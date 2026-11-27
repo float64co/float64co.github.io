@@ -350,3 +350,38 @@ class HelpAndExitTests(unittest.TestCase):
         self.assertEqual(sh2.eof_line(), "exit()")
         self.assertEqual(ctrl_d(sh2), "exit()")
         self.assertIsNone(sh2.session)  # the interpreter actually ran exit(), not the bare name
+
+
+class ShebangTests(unittest.TestCase):
+    def setUp(self):
+        self.sh = Shell(World("player", "lab"))
+
+    def script(self, shebang, path="t.py", body='import sys\nprint("ran", sys.argv)'):
+        self.sh.vfs.install(self.sh.abspath(path), (shebang + "\n" + body + "\n").encode(),
+                            owner="player", mode=0o755)
+
+    def test_python_shebangs_run_with_dot_slash(self):
+        for shebang in ("#!/usr/bin/python", "#!/usr/bin/python3", "#!/usr/bin/env python3",
+                        "#!/usr/bin/env python", "#! /usr/bin/python3", "#!/usr/bin/python3 -u"):
+            self.script(shebang)
+            self.assertEqual(run(self.sh, "./t.py a b")[0].strip(), "ran ['./t.py', 'a', 'b']", shebang)
+
+    def test_script_found_on_path(self):
+        run(self.sh, "mkdir -p ~/bin")
+        self.script("#!/usr/bin/env python3", "bin/tool")
+        run(self.sh, "PATH=$PATH:$HOME/bin")
+        self.assertEqual(run(self.sh, "tool x")[0].strip(), "ran ['/home/player/bin/tool', 'x']")
+
+    def test_stdin_reaches_the_script(self):
+        self.script("#!/usr/bin/python3", body="print(input().upper())")
+        self.assertEqual(run(self.sh, "echo hello | ./t.py")[0].strip(), "HELLO")
+
+    def test_missing_or_unknown_interpreters_still_fail(self):
+        for shebang in ("#!/opt/nowhere/python3", "#!/usr/bin/ruby", "#!/usr/bin/env ruby"):
+            self.script(shebang)
+            self.assertIn("bad interpreter", run(self.sh, "./t.py")[1], shebang)
+
+    def test_a_script_without_the_execute_bit_is_refused(self):
+        self.script("#!/usr/bin/python3")
+        run(self.sh, "chmod -x t.py")
+        self.assertIn("Permission denied", run(self.sh, "./t.py")[1])
