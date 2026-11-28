@@ -1,0 +1,6 @@
+.venv/
+client/node_modules/
+# client/dist/ is committed: the root index.html serves the game from there.
+# The build copies the music into it, so don't commit the originals as well.
+client/public/music/
+__pycache__/
